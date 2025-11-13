@@ -10,6 +10,7 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import (
     DTensor,
     Replicate,
+    Shard,
     distribute_tensor,
 )
 from torch.distributed.device_mesh import init_device_mesh
@@ -324,6 +325,38 @@ class DTensorTest(DistributedTestBase):
         # Operations on this DTensor may produce incorrect results because PyTorch
         # assumes all ranks have identical data
         self.assertEqual(dtensor.placements, (Replicate(),))
+
+    @skip_if_lt_x_gpu(2)
+    def test_big_tensor_creation_with_meta_device(self):
+        """Test creating a huge DTensor using meta device to avoid OOM."""
+        # Arrange
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Act
+        local_hbm_bytes = torch.cuda.get_device_properties(device).total_memory
+        num_elements = local_hbm_bytes * 7 // 4 // dtype.itemsize
+        tensor_size_bytes = num_elements * dtype.itemsize
+
+        print(f"Local HBM: {local_hbm_bytes:_} bytes")
+        print(f"Creating meta tensor: {num_elements=:_} = {tensor_size_bytes=:_}")
+
+        # Create tensor on meta device
+        big_meta_tensor = torch.arange(num_elements, device="meta", dtype=dtype)
+
+        # Act - distribute to DTensor with Shard placement
+        dtensor = distribute_tensor(big_meta_tensor, device_mesh, [Shard(0)])
+
+        # Assert - verify DTensor properties
+        expected_local_size = num_elements // self.world_size
+        self.assertEqual(dtensor.to_local().shape[0], expected_local_size)
+        self.assertEqual(dtensor.shape[0], num_elements)
+        self.assertTrue(isinstance(dtensor, DTensor))
+
+        local_tensor_size_bytes = dtensor.to_local().numel() * dtype.itemsize
+        print(f"Local DTensor size: {local_tensor_size_bytes:_} bytes")
 
 
 class ShardingTest(DistributedTestBase):
