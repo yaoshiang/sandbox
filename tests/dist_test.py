@@ -423,7 +423,7 @@ class ShardingTest(DistributedTestBase):
 
     @skip_if_lt_x_gpu(2)
     def test_rowwise_parallel_matmul_partial(self):
-        """Test a sharded matmul via torch.nn.Linear with RowwiseParallel and partial output.
+        """Test a sharded matmul with partial output.
 
         This would match how FSDP+TP likes to leave results partial."""
         # Arrange environment
