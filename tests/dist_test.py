@@ -349,7 +349,10 @@ class ShardingTest(DistributedTestBase):
 
     @skip_if_lt_x_gpu(2)
     def test_parallize_module_return_value_is_arg(self):
-        """Test that parallelize_module returns the same module instance passed in."""
+        """Test that parallelize_module returns the same module instance passed in.
+
+        This means the return value can be ignored.
+        """
         # Arrange environment
         self.create_pg("cuda:0")
         device = f"cuda:{self.rank}"
@@ -368,6 +371,75 @@ class ShardingTest(DistributedTestBase):
 
         # Assert
         self.assertIs(returned_model, model)
+
+    @skip_if_lt_x_gpu(2)
+    def test_col_to_no_shard_fails(self):
+        """Test that colwise followed by no parallel fails."""
+        # Arrange environment
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Arrange fixtures.
+        model = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
+        input = torch.randn(4, 8, device=device, dtype=dtype)
+        dtensor_input = distribute_tensor(input, device_mesh, [Replicate()])
+
+        # Act: Create the partially parallelized model.
+        parallelize_module(
+            model,
+            device_mesh=device_mesh,
+            parallelize_plan={
+                "fc1": ColwiseParallel(),
+                "fc2": None,
+            },
+        )
+
+        # Assert
+        print(f"{model.fc1.weight=}")
+        print(f"{model.fc2.weight=}")
+
+        self.assertIsInstance(model.fc1.weight, DTensor)
+        self.assertIsInstance(model.fc2.weight, torch.Tensor)  # Not sharded
+
+        # Assert: Failure due to default sharded output of colwise.
+        with self.assertRaisesRegex(
+            RuntimeError, r"mat1 and mat2 shapes cannot be multiplied \(4x8 and 16x8\)"
+        ):
+            _ = model(dtensor_input)
+
+    @skip_if_lt_x_gpu(2)
+    def test_col_with_replicate_plan_to_no_shard_passes(self):
+        """Test that colwise with replicate plan followed by no parallel can pass.
+
+        The key is that the Colwise needs to specify replicate as the output plan.
+        """
+        # Arrange environment
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Arrange fixtures.
+        model = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
+        input = torch.randn(4, 8, device=device, dtype=dtype)
+        dtensor_input = distribute_tensor(input, device_mesh, [Replicate()])
+        reference_output = model(input)
+
+        # Act: Create the partially parallelized model and run a computation.
+        parallelize_module(
+            model,
+            device_mesh=device_mesh,
+            parallelize_plan={
+                "fc1": ColwiseParallel(output_layouts=Replicate()),
+                "fc2": None,
+            },
+        )
+
+        dtensor_output = model(dtensor_input)
+
+        torch.testing.assert_close(dtensor_output, reference_output)
 
     @skip_if_lt_x_gpu(2)
     def test_rowwise_parallel_matmul_all_gather(self):
@@ -551,12 +623,11 @@ class DCPTest(DistributedTestBase):
         device_mesh = init_device_mesh("cuda", (self.world_size,))
 
         # Create and shard model
-        torch.manual_seed(123)
         model = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
         parallelize_module(
             model,
-            device_mesh,
-            {"fc1": ColwiseParallel(), "fc2": RowwiseParallel()},
+            device_mesh=device_mesh,
+            parallelize_plan={"fc1": ColwiseParallel(), "fc2": RowwiseParallel()},
         )
 
         # Save checkpoint
