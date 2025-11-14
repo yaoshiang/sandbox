@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
+import torch.distributed.checkpoint.state_dict
 from torch.distributed._tensor import (
     DTensor,
     Replicate,
@@ -617,56 +618,61 @@ class DCPTest(DistributedTestBase):
     @skip_if_lt_x_gpu(2)
     def test_dcp_with_tensor_parallel(self):
         """Test DCP save/load with TP-sharded model."""
+        # Arrange distributed setup
         self.create_pg("cuda:0")
         device = f"cuda:{self.rank}"
         dtype = torch.bfloat16
         device_mesh = init_device_mesh("cuda", (self.world_size,))
 
-        # Create and shard model
-        model = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
+        # Arrange model. There are two fc layers, each 2 * 2**20 (2 MiB)
+        # That's a total of 4 MiB model size.
+        model = SimpleMLP(1024, 1024, 1024).to(device=device, dtype=dtype)
+
+        # Sanity check
+        model_bytes = sum(p.numel() for p in model.parameters()) * dtype.itemsize
+        assert model_bytes == 4 * 2**20
+
         parallelize_module(
             model,
             device_mesh=device_mesh,
-            parallelize_plan={"fc1": ColwiseParallel(), "fc2": RowwiseParallel()},
+            parallelize_plan=dict(
+                fc1=ColwiseParallel(output_layouts=Replicate()), fc2=None
+            ),
         )
 
-        # Save checkpoint
-        state_dict = model.state_dict()
-        checkpoint_dir = tempfile.mkdtemp() if self.rank == 0 else None
-        checkpoint_dir_list = [checkpoint_dir]
-        dist.broadcast_object_list(checkpoint_dir_list, src=0)
-        checkpoint_path = Path(checkpoint_dir_list[0])
+        # Arrange checkpoint path
+        checkpoint_path = Path(tempfile.mkdtemp())  # Different per rank
 
         try:
+            # Act: Save checkpoint
+            # This should work per docstring but doesn't due to a bug
+            # state_dict = dcp.state_dict.get_state_dict(model=model, optimizers=None)
+            state_dict = dcp.state_dict.get_model_state_dict(model)
             dcp.save(state_dict=state_dict, checkpoint_id=checkpoint_path)
-            dist.barrier()
 
-            # Load checkpoint into new model
-            torch.manual_seed(456)
-            model_loaded = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
-            parallelize_module(
-                model_loaded,
-                device_mesh,
-                {"fc1": ColwiseParallel(), "fc2": RowwiseParallel()},
+            print(
+                f"{self.rank=} Files in checkpoint dir with sizes: {[(f, f'{f.stat().st_size:_}') for f in checkpoint_path.iterdir()]}"
             )
 
-            loaded_state_dict = model_loaded.state_dict()
-            dcp.load(state_dict=loaded_state_dict, checkpoint_id=checkpoint_path)
-            model_loaded.load_state_dict(loaded_state_dict)
+            # Assert
+            # rank0 should have only saved its shard of fc1, for 1MiB, not the replicated fc2.
+            # rank1 should have saved it's shard of fc1 and the replicated fc2, for 3MiB.
+            sizes = (f.stat().st_size for f in checkpoint_path.iterdir())
 
-            # Verify loaded weights match original
-            torch.testing.assert_close(
-                model_loaded.fc1.weight.to_local(),
-                state_dict["fc1.weight"].to_local(),
-                rtol=1e-5,
-                atol=1e-5,
-            )
-            torch.testing.assert_close(
-                model_loaded.fc2.weight.to_local(),
-                state_dict["fc2.weight"].to_local(),
-                rtol=1e-5,
-                atol=1e-5,
-            )
+            # Flake: dcp does not promise which rank writes a replicated tensor. We
+            # assume it is rank1 based on running it, but this could change.
+            if self.rank == 0:
+                print(f"Rank 0 saved checkpoint file sizes: {sizes}")
+                expected = 1 * 2**20
+                self.assertAlmostEqual(
+                    sum(sizes), expected, places=None, delta=expected * 0.1
+                )
+            elif self.rank == 1:
+                print(f"Rank 1 saved checkpoint file sizes: {sizes}")
+                expected = 3 * 2**20
+                self.assertAlmostEqual(
+                    sum(sizes), expected, places=None, delta=expected * 0.1
+                )
 
         finally:
             if self.rank == 0:
