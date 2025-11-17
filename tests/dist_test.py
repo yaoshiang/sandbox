@@ -378,9 +378,17 @@ class ShardingTest(DistributedTestBase):
 
         # Arrange fixtures.
         model = torch.nn.Linear(2, 3, bias=False).to(device=device, dtype=dtype)
+        expected = model(torch.ones(100, 2, device=device, dtype=dtype))
+        x = torch.distributed.tensor.ones(
+            100, 2, device_mesh=device_mesh, placements=[Shard(1)], dtype=dtype
+        )
+
+        # Sanity check. Local tensor x dim 1 is only 1, not 2.
+        self.assertEqual(x.to_local().shape, (100, 1))
 
         ## Subtest #1: Create sharded module and verify shapes.
-        # Act
+        # Act. Parallelize the module. Rowwise output_layout is replicate
+        # so we should see an all-gather.
         parallelize_module(
             model,
             device_mesh,
@@ -407,25 +415,26 @@ class ShardingTest(DistributedTestBase):
             torch.testing.assert_close(gathered[1], model.weight.to_local())
 
         # Subtest #2: Execute the matmul
-        # Arrange: create sharded input
-        input_tensor = torch.ones(100, 2, device=device, dtype=dtype)
-        distributed_input = distribute_tensor(input_tensor, device_mesh, [Shard(1)])
-
-        # Verify input sharding
-        self.assertEqual(distributed_input.to_local().shape, (100, 1))
 
         # Act
-        result = model(distributed_input)
+        result = model(x)
         result = result.wait()
 
-        # Assert
-        self.assertEqual(result.shape, (100, 3))
+        # Assert output is replicated.
+        gathered = [
+            torch.empty(100, 3, device=device, dtype=dtype)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, result)
+        torch.testing.assert_close(gathered[0], gathered[1])
+        self.assertFalse(torch.allclose(gathered[0] + gathered[1], expected))
 
     @skip_if_lt_x_gpu(2)
     def test_rowwise_parallel_matmul_partial(self):
         """Test a sharded matmul with partial output.
 
-        This would match how FSDP+TP likes to leave results partial."""
+        This would match how FSDP+TP likes to leave results partial.
+        """
         # Arrange environment
         self.create_pg("cuda:0")
         device = f"cuda:{self.rank}"
@@ -434,20 +443,29 @@ class ShardingTest(DistributedTestBase):
 
         # Arrange
         model = torch.nn.Linear(2, 3, bias=False).to(device=device, dtype=dtype)
+        expected = model(torch.ones(100, 2, device=device, dtype=dtype))
+        x = torch.distributed.tensor.ones(
+            100, 2, device_mesh=device_mesh, placements=[Shard(1)], dtype=dtype
+        )
+
+        # Act
         parallelize_module(
             model,
             device_mesh,
             RowwiseParallel(output_layouts=Partial()),
-        )
-        x = torch.distributed.tensor.ones(
-            100, 2, device_mesh=device_mesh, placements=[Shard(1)], dtype=dtype
         )
 
         # Act
         result = model(x)
 
         # Assert
-        self.assertEqual(result.shape, (100, 3))
+        gathered = [
+            torch.empty(100, 3, device=device, dtype=dtype)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, result)
+        self.assertFalse(torch.allclose(gathered[0], gathered[1]))
+        torch.testing.assert_close(gathered[0] + gathered[1], expected)
 
     @skip_if_lt_x_gpu(2)
     def test_tp_weight_shapes(self):
