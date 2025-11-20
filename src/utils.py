@@ -4,20 +4,11 @@ This module provides tools to trace how PyTorch compiles distributed operations,
 particularly useful for understanding DTensor's collective insertion and decomposition.
 """
 
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Optional
 import torch._inductor.decomposition
 import torch._inductor.compile_fx
 from torch._dynamo.backends.common import aot_autograd
 import torch.distributed as dist
-
-
-@dataclass
-class CompilationTrace:
-    """Captured FX graphs from different compilation stages.
-
-    Attributes:
-    """
 
 
 class CompilationTracer:
@@ -30,42 +21,39 @@ class CompilationTracer:
     """
 
     def __init__(self):
-        self.high_level_graph: Optional[torch.fx.GraphModule] = None
-        self.lowered_graph: Optional[torch.fx.GraphModule] = None
+        self.dynamo_graph: Optional[torch.fx.GraphModule] = None
+        self.aot_autograd_graph: Optional[torch.fx.GraphModule] = None
         self.rank: int = dist.get_rank() if dist.is_initialized() else 0
 
-    def create_backend(
-        self,
-    ) -> Callable[[torch.fx.GraphModule, list[Any]], Callable]:
-        """Create a custom torch.compile backend that traces compilation stages.
+    def __call__(self, gm: torch.fx.GraphModule, example_inputs):
+        """Custom torch.compile backend that stores dyanamo and aotautograd graphs.
 
-        Returns a backend function compatible with torch.compile(backend=...).
-        The backend traces graphs during compilation but still produces optimized code.
+        Compatible with torch.compile(backend=tracer_instance).
+        Traces graphs during compilation but still produces optimized code.
+
+        Raises:
+            NotImplementedError: Always raised to prevent actual execution.
         """
+        # Stash dynamo graph.
+        self.dynamo_graph = gm
 
-        def tracing_backend(gm: torch.fx.GraphModule, example_inputs):
-            # Trace high-level graph (before decomposition)
-            self.high_level_graph = gm
+        # Create a fw_compiler that stashes the aot_autograd lowered graph.
+        def trace_and_compile(gm_inner: torch.fx.GraphModule, example_inputs_inner):
+            # Trace the lowered graph (after decomposition)
+            self.aot_autograd_graph = gm_inner
+            return torch._inductor.compile_fx.compile_fx(gm_inner, example_inputs_inner)
 
-            # Create a fw_compiler that traces the lowered graph then compiles it
-            def trace_and_compile(gm_inner: torch.fx.GraphModule, example_inputs_inner):
-                # Trace the lowered graph (after decomposition)
-                self.lowered_graph = gm_inner
-                # Then actually compile it so the model runs with optimizations
-                return torch._inductor.compile_fx.compile_fx(
-                    gm_inner, example_inputs_inner
-                )
+        # Use Inductor's decomposition table to lower DTensor primitives
+        # into concrete collective operations (e.g., prim_redistribute -> all_reduce)
+        backend = aot_autograd(
+            fw_compiler=trace_and_compile,
+            decompositions=torch._inductor.decomposition.select_decomp_table(),
+        )
 
-            # Use Inductor's decomposition table to lower DTensor primitives
-            # into concrete collective operations (e.g., prim_redistribute -> all_reduce)
-            aot_backend = aot_autograd(
-                fw_compiler=trace_and_compile,
-                decompositions=torch._inductor.decomposition.select_decomp_table(),
-            )
+        # Actually invoke the backend to trigger the fw_compiler
+        backend(gm, example_inputs)
 
-            return aot_backend(gm, example_inputs)
-
-        return tracing_backend
+        raise NotImplementedError("Graphs stashed. Execution prevented")
 
 
 def pformat_trace(trace: CompilationTracer) -> str:
@@ -81,33 +69,32 @@ def pformat_trace(trace: CompilationTracer) -> str:
     lines = []
     rank = trace.rank
 
-    # High-level graph (Dynamo output / pre-decomposition)
-    if trace.high_level_graph:
-        lines.append("")
-        lines.append("=" * 80)
-        lines.append(f"[Rank {rank}] Dynamo Graph (Pre-Decomposition)")
-        lines.append("=" * 80)
-        lines.append(str(trace.high_level_graph.graph))
-        lines.append("=" * 80)
+    # dynamo graph
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append(f"[Rank {rank}] Dynamo Graph.")
+    lines.append("=" * 80)
+    lines.append(str(trace.dynamo_graph.graph))
+    lines.append("=" * 80)
 
-        lines.append("")
-        lines.append(f"[Rank {rank}] Dynamo Graph (Generated Code)")
-        lines.append("-" * 80)
-        lines.append(trace.high_level_graph.code)
-        lines.append("-" * 80)
+    lines.append("")
+    lines.append(f"[Rank {rank}] Dynamo Graph (Generated Code)")
+    lines.append("-" * 80)
+    lines.append(trace.dynamo_graph.code)
+    lines.append("-" * 80)
 
-    # Lowered graph (AOTAutograd output / post-decomposition)
-    if trace.lowered_graph:
-        lines.append("")
-        lines.append("=" * 80)
-        lines.append(f"[Rank {rank}] ATen Graph (Post-Decomposition)")
-        lines.append("=" * 80)
-        lines.append(str(trace.lowered_graph.graph))
-        lines.append("=" * 80)
+    # aot_autograd graph
+    lines.append("")
+    lines.append("=" * 80)
+    lines.append(f"[Rank {rank}] aot_autograd graph")
+    lines.append("=" * 80)
+    lines.append(str(trace.aot_autograd_graph.graph))
+    lines.append("=" * 80)
 
-        lines.append("")
-        lines.append(f"[Rank {rank}] ATen Graph (Generated Code)")
-        lines.append("-" * 80)
-        lines.append(trace.lowered_graph.code)
-        lines.append("-" * 80)
+    lines.append("")
+    lines.append(f"[Rank {rank}] aot_autograd graph (Generated Code)")
+    lines.append("-" * 80)
+    lines.append(trace.aot_autograd_graph.code)
+    lines.append("-" * 80)
+
     return "\n".join(lines)
