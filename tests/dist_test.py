@@ -10,6 +10,8 @@ import torch.distributed.checkpoint as dcp
 from torch.distributed._tensor import (
     DTensor,
     Replicate,
+    Shard,
+    Partial,
     distribute_tensor,
 )
 from torch.distributed.device_mesh import init_device_mesh
@@ -22,7 +24,6 @@ from torch.testing._internal.common_distributed import (
     DistributedTestBase,
     skip_if_lt_x_gpu,
 )
-from torch.testing._internal.common_utils import run_tests
 
 from .fixtures import SimpleMLP
 
@@ -221,37 +222,13 @@ class DTensorTest(DistributedTestBase):
 
     @skip_if_lt_x_gpu(2)
     def test_dtensor_replicate(self):
-        """Test DTensor with Replicate placement using rank 0 broadcast.
-
-        Only rank 0 creates the actual data. distribute_tensor with Replicate
-        placement broadcasts rank 0's data to all other ranks.
-        """
-        # Arrange
-        self.create_pg("cuda:0")
-        device = f"cuda:{self.rank}"
-        dtype = torch.bfloat16
-        device_mesh = init_device_mesh("cuda", (self.world_size,))
-
-        # Rank 0 creates the actual tensor, the others will get replicated into.
-        if self.rank == 0:
-            tensor = torch.arange(1024, device=device, dtype=dtype).view(32, 32)
-        else:
-            tensor = torch.empty(32, 32, device=device, dtype=dtype)
-
-        # Act. Broadcast from rank 0.
-        dtensor = distribute_tensor(tensor, device_mesh, [Replicate()])
-        result = dtensor + 1
-
-        # Assert: all ranks should see the updated data.
-        expected_local = torch.arange(1024, device=device, dtype=dtype).view(32, 32) + 1
-        torch.testing.assert_close(result.to_local(), expected_local)
-
-    @skip_if_lt_x_gpu(2)
-    def test_dtensor_replicate_overwrites_non_rank0(self):
         """Test that Replicate placement overwrites non-rank0 data with rank 0's data.
 
         Each rank creates different local data, but distribute_tensor with Replicate
         always uses rank 0's data and overwrites all other ranks' tensors.
+
+        This inefficiently initializes rank1's tensor only to overwrite it, but
+        this allows us to ensure that Replicate is overwriting data.
         """
         # Arrange
         self.create_pg("cuda:0")
@@ -272,9 +249,10 @@ class DTensorTest(DistributedTestBase):
         dtensor = distribute_tensor(tensor, device_mesh, [Replicate()])
 
         # Assert
-        # ALL ranks should now have rank 0's data (0-15), not their original data
+        # ALL ranks should now have rank 0's data (0-15), in both the DTensor and original tensor.
         expected_local = torch.arange(16, device=device, dtype=dtype).view(4, 4)
         torch.testing.assert_close(dtensor.to_local(), expected_local)
+        torch.testing.assert_close(tensor, expected_local)
 
         # Rank 1's original data (100-115) has been overwritten
         if self.rank == 1:
@@ -282,9 +260,11 @@ class DTensorTest(DistributedTestBase):
             original_rank1_data = (
                 torch.arange(16, device=device, dtype=dtype).view(4, 4) + 100
             )
-            # This should NOT match - rank 1's data was overwritten
+            # Neither the DTensor nor the original tensor should match - rank 1's data was overwritten
             with self.assertRaises(AssertionError):
                 torch.testing.assert_close(dtensor.to_local(), original_rank1_data)
+            with self.assertRaises(AssertionError):
+                torch.testing.assert_close(tensor, original_rank1_data)
 
     @skip_if_lt_x_gpu(2)
     def test_dtensor_from_local_with_replicate(self):
@@ -325,6 +305,38 @@ class DTensorTest(DistributedTestBase):
         # assumes all ranks have identical data
         self.assertEqual(dtensor.placements, (Replicate(),))
 
+    @skip_if_lt_x_gpu(2)
+    def test_big_tensor_creation_with_meta_device(self):
+        """Test creating a huge DTensor using meta device to avoid OOM."""
+        # Arrange
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Act
+        local_hbm_bytes = torch.cuda.get_device_properties(device).total_memory
+        num_elements = local_hbm_bytes * 7 // 4 // dtype.itemsize
+        tensor_size_bytes = num_elements * dtype.itemsize
+
+        print(f"Local HBM: {local_hbm_bytes:_} bytes")
+        print(f"Creating meta tensor: {num_elements=:_} = {tensor_size_bytes=:_}")
+
+        # Create tensor on meta device
+        big_meta_tensor = torch.arange(num_elements, device="meta", dtype=dtype)
+
+        # Act - distribute to DTensor with Shard placement
+        dtensor = distribute_tensor(big_meta_tensor, device_mesh, [Shard(0)])
+
+        # Assert - verify DTensor properties
+        expected_local_size = num_elements // self.world_size
+        self.assertEqual(dtensor.to_local().shape[0], expected_local_size)
+        self.assertEqual(dtensor.shape[0], num_elements)
+        self.assertTrue(isinstance(dtensor, DTensor))
+
+        local_tensor_size_bytes = dtensor.to_local().numel() * dtype.itemsize
+        print(f"Local DTensor size: {local_tensor_size_bytes:_} bytes")
+
 
 class ShardingTest(DistributedTestBase):
     """Tests for sharding for models."""
@@ -332,6 +344,128 @@ class ShardingTest(DistributedTestBase):
     @property
     def world_size(self):
         return 2
+
+    @skip_if_lt_x_gpu(2)
+    def test_parallize_module_return_value_is_arg(self):
+        """Test that parallelize_module returns the same module instance passed in."""
+        # Arrange environment
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Arrange fixtures.
+        model = SimpleMLP(8, 16, 8).to(device=device, dtype=dtype)
+
+        # Act
+        returned_model = parallelize_module(
+            model,
+            device_mesh,
+            {"fc1": ColwiseParallel(), "fc2": RowwiseParallel()},
+        )
+
+        # Assert
+        self.assertIs(returned_model, model)
+
+    @skip_if_lt_x_gpu(2)
+    def test_rowwise_parallel_matmul_all_gather(self):
+        """Test a sharded matmul via torch.nn.Linear with RowwiseParallel."""
+        # Arrange environment
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Arrange fixtures.
+        model = torch.nn.Linear(2, 3, bias=False).to(device=device, dtype=dtype)
+        expected = model(torch.ones(100, 2, device=device, dtype=dtype))
+        x = torch.distributed.tensor.ones(
+            100, 2, device_mesh=device_mesh, placements=[Shard(1)], dtype=dtype
+        )
+
+        # Sanity check. Local tensor x dim 1 is only 1, not 2.
+        self.assertEqual(x.to_local().shape, (100, 1))
+
+        ## Subtest #1: Create sharded module and verify shapes.
+        # Act. Parallelize the module. Rowwise output_layout is replicate
+        # so we should see an all-gather.
+        parallelize_module(
+            model,
+            device_mesh,
+            RowwiseParallel(),
+        )
+
+        # Assert weight is now a DTensor
+        self.assertTrue(isinstance(model.weight, DTensor))
+
+        # Assert shapes are correct.
+        print(model.weight.to_local().shape)
+        self.assertEqual(model.weight.to_local().shape, (3, 1))
+
+        # Assert weights are different.
+        gathered = [
+            torch.empty(3, 1, device=device, dtype=dtype)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, model.weight.to_local())
+        self.assertFalse(torch.allclose(gathered[0], gathered[1]))
+        if self.rank == 0:
+            torch.testing.assert_close(gathered[0], model.weight.to_local())
+        elif self.rank == 1:
+            torch.testing.assert_close(gathered[1], model.weight.to_local())
+
+        # Subtest #2: Execute the matmul
+
+        # Act
+        result = model(x)
+        result = result.wait()
+
+        # Assert output is replicated.
+        gathered = [
+            torch.empty(100, 3, device=device, dtype=dtype)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, result)
+        torch.testing.assert_close(gathered[0], gathered[1])
+        self.assertFalse(torch.allclose(gathered[0] + gathered[1], expected))
+
+    @skip_if_lt_x_gpu(2)
+    def test_rowwise_parallel_matmul_partial(self):
+        """Test a sharded matmul with partial output.
+
+        This would match how FSDP+TP likes to leave results partial.
+        """
+        # Arrange environment
+        self.create_pg("cuda:0")
+        device = f"cuda:{self.rank}"
+        dtype = torch.bfloat16
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        # Arrange
+        model = torch.nn.Linear(2, 3, bias=False).to(device=device, dtype=dtype)
+        expected = model(torch.ones(100, 2, device=device, dtype=dtype))
+        x = torch.distributed.tensor.ones(
+            100, 2, device_mesh=device_mesh, placements=[Shard(1)], dtype=dtype
+        )
+
+        # Act
+        parallelize_module(
+            model,
+            device_mesh,
+            RowwiseParallel(output_layouts=Partial()),
+        )
+
+        # Act
+        result = model(x)
+
+        # Assert
+        gathered = [
+            torch.empty(100, 3, device=device, dtype=dtype)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gathered, result)
+        self.assertFalse(torch.allclose(gathered[0], gathered[1]))
+        torch.testing.assert_close(gathered[0] + gathered[1], expected)
 
     @skip_if_lt_x_gpu(2)
     def test_tp_weight_shapes(self):
@@ -466,7 +600,3 @@ class DCPTest(DistributedTestBase):
                 import shutil
 
                 shutil.rmtree(checkpoint_path, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    run_tests()
