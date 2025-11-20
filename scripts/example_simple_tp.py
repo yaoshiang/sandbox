@@ -45,11 +45,13 @@ def main():
     # Create device mesh
     device_mesh = init_device_mesh("cuda", (dist.get_world_size(),))
 
-    # Create and shard model
+    # Create input and model and shard model
+    x = torch.distributed.tensor.ones(
+        4, 8, device_mesh=device_mesh, dtype=torch.bfloat16
+    )
     model = SimpleMLP(dim_in=8, dim_hidden=32, dim_out=8).to(
         device, dtype=torch.bfloat16
     )
-
     parallelize_module(
         model,
         device_mesh,
@@ -61,13 +63,13 @@ def main():
 
     # Trace compilation to capture FX graphs
     tracer = CompilationTracer()
-    compiled_model = torch.compile(
-        model, backend=tracer.create_backend(), fullgraph=True
-    )
-
-    # Trigger compilation to populate the trace
-    x = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
-    _ = compiled_model(x)
+    compiled_model = torch.compile(model, backend=tracer, fullgraph=True)
+    try:
+        # Trigger compilation to populate the trace.
+        _ = compiled_model(x)
+    except torch._dynamo.exc.BackendCompilerFailed:
+        # The tracer always raises to prevent execution of a non-lowered graph.
+        pass
 
     # Format and print the trace
     print(pformat_trace(tracer))
