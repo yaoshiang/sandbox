@@ -1,4 +1,6 @@
-"""Proof-of-concept that PyTorch does support MPMD already: cuda and cpu.
+"""Proof-of-concept that PyTorch does support limited MPMD already.
+
+The "cluster" in question is composed of two devices: The CUDA GPU and the CPU. 
 
 We use a linear regression as the stand-in for a complex model. The
 inference server runs on cuda because pytorch cuda supports async ops. We add
@@ -6,8 +8,12 @@ a cuda-sleep op to simulate a small, slow inference cluster.
 
 The training server runs on CPU and does a much heavier weight computation.
 
+Note that the rollout server runs at a different pace than the training server. 
+We find empirically that we have a replay ratio of about 9:1. Each
+rollout is re-used about 9 times. 
+
 ```
-(tt) yho_google_com@yho-l4:~/Documents/GitHub/sandbox$ python scripts/example_mpmd.py 
+(tt) yho_google_com@yho-l4:~/Documents/GitHub/sandbox$ python scripts/example_mpmd.py
 
 rollout_step=0
 
@@ -115,11 +121,8 @@ OUTPUT_DIM = 1
 
 torch.set_default_dtype(torch.float64)
 
-SLOW_CLUSTER = "cuda"
-FAST_CLUSTER = "cpu"
 
-
-def rl_inference_rollout(model, prompt):
+def rl_inference_rollout(model, prompt, device):
     """Runs one step of inference on a small, slow cluster.
 
     Args:
@@ -129,11 +132,12 @@ def rl_inference_rollout(model, prompt):
     Returns:
         A scalar representing the "completion", on CPU
     """
+    model.to(device)
     rollout = model(prompt)
     return rollout
 
 
-def rl_training_step(model, prompt, rollout, criterion, optimizer):
+def rl_training_step(model, prompt, rollout, criterion, optimizer, device):
     """Runs one step of training on a "larger, faster" cluster.
 
     Returns:
