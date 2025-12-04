@@ -13,17 +13,71 @@ We find empirically that we have a replay ratio of about 9:1. Each
 rollout is re-used about 9 times.
 
 ```
+$ python scripts/example_mpmd_cpu_cuda.py
+
+rollout_step=0
+
+rollout_step=1
+  train_step=0, loss.item()=0.3418
+
+rollout_step=2
+  train_step=0, loss.item()=1.2500
+  train_step=1, loss.item()=0.4238
+  train_step=2, loss.item()=0.2432
+
+rollout_step=3
+  train_step=0, loss.item()=0.0036
+  train_step=1, loss.item()=0.0036
+  train_step=2, loss.item()=0.0032
+  train_step=3, loss.item()=0.0032
+
+rollout_step=4
+  train_step=0, loss.item()=0.0017
+  train_step=1, loss.item()=0.0016
+  train_step=2, loss.item()=0.0016
+  train_step=3, loss.item()=0.0015
+
+rollout_step=5
+  train_step=0, loss.item()=0.0051
+  train_step=1, loss.item()=0.0050
+  train_step=2, loss.item()=0.0047
+  train_step=3, loss.item()=0.0045
+
+rollout_step=6
+  train_step=0, loss.item()=0.0018
+  train_step=1, loss.item()=0.0018
+  train_step=2, loss.item()=0.0018
+  train_step=3, loss.item()=0.0016
+  train_step=4, loss.item()=0.0015
+
+rollout_step=7
+  train_step=0, loss.item()=0.0042
+  train_step=1, loss.item()=0.0041
+  train_step=2, loss.item()=0.0039
+  train_step=3, loss.item()=0.0035
+
+rollout_step=8
+  train_step=0, loss.item()=0.0042
+  train_step=1, loss.item()=0.0039
+  train_step=2, loss.item()=0.0038
+  train_step=3, loss.item()=0.0036
+
+rollout_step=9
+  train_step=0, loss.item()=0.0033
+  train_step=1, loss.item()=0.0032
+  train_step=2, loss.item()=0.0031
+  train_step=3, loss.item()=0.0029
 ```
 """
 
 import torch
 
 
-BATCH_SIZE = 32
-INPUT_DIM = 1024
+BATCH_SIZE = 4
+INPUT_DIM = 2**20
 OUTPUT_DIM = 1
 
-torch.set_default_dtype(torch.float64)
+torch.set_default_dtype(torch.bfloat16)
 
 
 def rl_inference_rollout(model, prompt):
@@ -41,7 +95,7 @@ def rl_inference_rollout(model, prompt):
     # Simulate sampling by fuzzing the "rollout"
     rollout = rollout + (torch.rand_like(rollout, requires_grad=False) * 0.1)
     # Simulate a "small, slow" cluster by sleeping on CUDA
-    torch.cuda._sleep(5 * 10**6)
+    torch.cuda._sleep(10**7)
     return rollout
 
 
@@ -67,7 +121,7 @@ def main():
     model_training = torch.nn.Linear(INPUT_DIM, OUTPUT_DIM).to("cpu")
 
     # Create optimizer and loss
-    optimizer = torch.optim.SGD(model_training.parameters(), lr=1e-3)
+    optimizer = torch.optim.SGD(model_training.parameters(), lr=1e-6)
     criterion = torch.nn.MSELoss()
 
     replay_buffer = None
@@ -91,7 +145,7 @@ def main():
 
         # On rollout_step > 0, we have a replay buffer
         # Poll until rollout is ready
-        for train_step in range(50):
+        for train_step in range(100):
             if done_event.query():
                 break
             loss = rl_training_step(
