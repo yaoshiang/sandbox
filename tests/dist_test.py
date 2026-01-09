@@ -1,8 +1,10 @@
 """Distributed tests using PyTorch's distributed testing infrastructure."""
 
+from typing import Sequence
 import copy
 import tempfile
 from pathlib import Path
+import unittest
 
 import torch
 import torch.distributed as dist
@@ -339,6 +341,154 @@ class DTensorTest(DistributedTestBase):
             f"{self.rank=}: Meta tensor: {global_items=:_} = {global_tensor_size_bytes=:_}"
         )
         print(f"Local DTensor size: {local_tensor_size_bytes:_} bytes")
+
+    def base_test_at_operator(
+        self, device_mesh, a_placement, b_placement, expected_result_placement
+    ):
+        """Test that @ operator results in expected placement."""
+        # Create two DTensors with specified placements
+        a = torch.distributed.tensor.randn(
+            (4, 4), device_mesh=device_mesh, placements=a_placement
+        )
+        b = torch.distributed.tensor.randn(
+            (4, 4), device_mesh=device_mesh, placements=b_placement
+        )
+
+        # Act
+        result = a @ b
+
+        # Assert
+        self.assertEqual(
+            result.placements,
+            expected_result_placement,
+            msg=f"\n{a_placement=}\n{b_placement=}\n{result.placements=}\n{expected_result_placement=}",
+        )
+
+    @skip_if_lt_x_gpu(2)
+    def test_at_operator_sharding(self):
+        # Arrange
+        self.create_pg("cuda:0")
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+
+        params: Sequence[dict] = [
+            # Replicated tensors will decompose into local matmuls without collectives.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Replicate()],
+                b_placement=[Replicate()],
+                expected_result_placement=[Replicate()],
+            ),
+            # The contracting dim is so we could get back partial result.
+            # But how do we know DTensor won't decide to allreduce to the final result?
+            # It appears that the basic rule is, Dtensor tries to keep things
+            # as sharded as possible, including returning partial results.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Shard(1)],
+                b_placement=[Shard(0)],
+                expected_result_placement=[Partial()],
+            ),
+            # Contracting dim is sharded on b, but not a.
+            # Will DTensor return row shard or partial?
+            # Following the rule that DTensor maximizes sharding,
+            # it returns partial.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Replicate()],
+                b_placement=[Shard(0)],
+                expected_result_placement=[Partial()],
+            ),
+            # Contracting dim is replicated on a and b.
+            # b is col sharded. Will DTensor @ return
+            # col shard or replicated? Sharded... always
+            # maximizes sharding.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Replicate()],
+                b_placement=[Shard(1)],
+                expected_result_placement=[Shard(1)],
+            ),
+            # Contracting dim is replicated on a and b.
+            # a is row sharded. Will DTensor @ return
+            # row shard or replicated? Sharded... always
+            # maximizes sharding.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Shard(0)],
+                b_placement=[Replicate()],
+                expected_result_placement=[Shard(0)],
+            ),
+            # Contracting dim is replicated, otherwise
+            # a is row sharded, b is col sharded. Will
+            # DTensor return row or col sharded? Either
+            # maximizes sharding, so a or b must take
+            # precedence. Here, it pick's a's sharding.
+            dict(
+                device_mesh=device_mesh,
+                a_placement=[Shard(0)],
+                b_placement=[Shard(1)],
+                expected_result_placement=[Shard(0)],
+            ),
+        ]
+
+        for param_dict in params:
+            with self.subTest(params_dict=param_dict):
+                print(f"Testing with params: {param_dict}")
+                self.base_test_at_operator(**param_dict)
+
+    @skip_if_lt_x_gpu(2)
+    def test_dtensor_device_attr_exposes_local_info(self):
+        """Show that DTensor.device means local device, not global mesh.
+
+        Although DTensor holds logical information about a sharded tensor,
+        it is still a subclass of torch.Tensor. In some cases, the
+        attributes inherited from torch.Tensor refer to the logical tensor,
+        such as shape. But the device attribute refers to the local shard.
+
+        One problem with this design is that the standard attributes of torch.Tensor
+        now could refer to the logical distributed tensor, or the local shard.
+
+        Another approach could have been to overload the meaning of "device" to
+        also take a mesh and placement. This is what JAX did with the device
+        arg to the jax.Array constructor.
+
+        A second approach could have been the "refused bequest" or "subtype excision":
+        making device meaningless, and adding a new attribute for local_device to make
+        explicit that there is no single device for a distributed tensor.
+        """
+        # Preliminaries: check that CPU and CUDA tensors do have a device attribute.
+        cpu_tensor = torch.ones(4, 4, device="cpu")
+        assert cpu_tensor.device.type == "cpu"
+
+        cuda_tensor = torch.ones(4, 4, device="cuda")
+        assert cuda_tensor.device.type == "cuda"
+
+        # Create a Dtensor.
+        self.create_pg("cuda:0")
+        device_mesh = init_device_mesh("cuda", (self.world_size,))
+        cuda_dtensor = torch.distributed.tensor.randn(
+            (4, 4), device_mesh=device_mesh, placements=[Shard(0)]
+        )
+
+        # Dtensor is an instance of torch.Tensor!
+        self.assertIsInstance(cuda_dtensor, torch.Tensor)
+        self.assertIsInstance(cuda_dtensor, torch.distributed.tensor.DTensor)
+
+        # DTensor internally combines Mesh and Placement into a DTensorSpec,
+        # akin to a JAX PartitionSpec (tuple of mesh and partitioning).
+        print(f"{cuda_dtensor._spec=}")
+        self.assertIsNotNone(cuda_dtensor._spec)
+
+        # DTensor DOES have a .device attribute, which exposes
+        # information on the local placement.
+        if self.rank == 0:
+            self.assertEqual(cuda_dtensor.device.type, "cuda")
+            self.assertEqual(cuda_dtensor.device.index, 0)
+        elif self.rank == 1:
+            self.assertEqual(cuda_dtensor.device.type, "cuda")
+            self.assertEqual(cuda_dtensor.device.index, 1)
+        else:
+            raise ValueError
 
 
 class ShardingTest(DistributedTestBase):
