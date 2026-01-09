@@ -7,15 +7,15 @@ over the torch_titan based requirements.txt which set up a decent PyTorch CUDA e
 pip install --upgrade "jax[cpu]"
 ```
 
-This script helps delineate multiple interrelated concepts. 
+This script helps delineate multiple interrelated concepts.
 
 Propagation: Given two sharded input tensors, what's the right sharding for the output tensor?
 This is obvious for simple ops, but for example at the end of the Megatron style TP sharding
 of a 2 layer FF network, should the output be sharded along the TP axis or replicated? The
 original paper says replicated, but the JAX Scaling playbook recommends sharding along
-the TP axis. *Someone* has to decide this. 
+the TP axis. *Someone* has to decide this.
 
-In [the JAX docs](https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html#using-a-mixture-of-sharding-modes), 
+In [the JAX docs](https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html#using-a-mixture-of-sharding-modes),
 The 1st form of propagation is Automatic. In Automatic, the compiler
 handles output shardings... this is referred to a compiler tickling and is generally not fun.
 
@@ -23,24 +23,24 @@ The 2nd form of propagation mentioned is Explicit. That means, either JAX decide
 on the output sharding based on simple, obvious rules. Or when such a rule
 does not exist, JAX requires that the programmer specify an out_sharding.
 
-The 3rd and final form is basically manual collectives - the programmer figures it out. 
+The 3rd and final form is basically manual collectives - the programmer figures it out.
 
 Placement: Given a sharding for the inputs and outputs, how should the computation be arranged?
-For example, when adding two sharded tensors, we can 
+For example, when adding two sharded tensors, we can
 all gather first, then sum, or, get a partial sum, then all-reduce. That decision is
-called "placement" in the language of GSPMD and PartIR and Shardy. 
+called "placement" in the language of GSPMD and PartIR and Shardy.
 
-GSPMD: An older platform to handle propagation and placement out of CoreML. 
+[GSPMD](https://arxiv.org/abs/2105.04663): An older platform to handle propagation and placement out of CoreML.
 
-PartIR: Yet another approach out of GDM. 
+[PartIR](https://arxiv.org/abs/2401.11202): Yet another approach out of GDM.
 
-Shardy: A newer one built by both GDM and CoreML. 
+[Shardy](https://openxla.org/shardy): A newer one built by the teams behind both GSPMD and PartIR.
 
 The following script demonstrates Explicit propagation on Megatron sharding. We specify
-an out_sharding, which is what makes this explicit. It's still Shardy/GSPMD that
-decides "placement", or the order of math ops and collectives to get to the right answer. 
+an out_sharding, forcing this to be explicit. It's still Shardy/GSPMD that
+decides "placement", or the order of math ops and collectives to get to the right answer.
 Here, it does NOT use reduce-scatter, but instead uses all-reduce and slice, likely because
-this is run on a mocked CPU mesh. 
+this is run on a mocked CPU mesh.
 
 Output below. Note that the compiled SHLO function takes smaller tensors than x, ff1, or ff2.
 This is because GSPMD/Shardy has figured out how to shard the jax.Arrays into
