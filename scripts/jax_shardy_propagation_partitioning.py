@@ -1,4 +1,4 @@
-"""This script demonstrates propagation and placement in JAX.
+"""This script demonstrates propagation and partitioning in JAX.
 
 To run it, you'll need to pip install JAX cpu. It's probably safe to do so
 over the torch_titan based requirements.txt which set up a decent PyTorch CUDA environment.
@@ -17,28 +17,28 @@ the TP axis. *Someone* has to decide this.
 
 In [the JAX docs](https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html#using-a-mixture-of-sharding-modes),
 The 1st form of propagation is Automatic. In Automatic, the compiler
-handles output shardings... this is referred to a compiler tickling and is generally not fun.
+handles output shardings... this is referred to as compiler tickling and is generally not fun.
 
 The 2nd form of propagation mentioned is Explicit. That means, either JAX decides
-on the output sharding based on simple, obvious rules. Or when such a rule
+on the output sharding based on simple, obvious rules. When such a rule
 does not exist, JAX requires that the programmer specify an out_sharding.
 
 The 3rd and final form is basically manual collectives - the programmer figures it out.
 
-Placement: Given a sharding for the inputs and outputs, how should the computation be arranged?
+Partitioning: Given a sharding for the inputs and outputs, how should the computation be arranged?
 For example, when adding two sharded tensors, we can
 all gather first, then sum, or, get a partial sum, then all-reduce. That decision is
-called "placement" in the language of GSPMD and PartIR and Shardy.
+called "partitioning" in the language of GSPMD and PartIR and Shardy.
 
-[GSPMD](https://arxiv.org/abs/2105.04663): An older platform to handle propagation and placement out of CoreML.
+[GSPMD](https://arxiv.org/abs/2105.04663): An older platform to handle propagation and partitioning.
 
-[PartIR](https://arxiv.org/abs/2401.11202): Yet another approach out of GDM.
+[PartIR](https://arxiv.org/abs/2401.11202): Yet another approach, out of GDM.
 
 [Shardy](https://openxla.org/shardy): A newer one built by the teams behind both GSPMD and PartIR.
 
 The following script demonstrates Explicit propagation on Megatron sharding. We specify
 an out_sharding, forcing this to be explicit. It's still Shardy/GSPMD that
-decides "placement", or the order of math ops and collectives to get to the right answer.
+decides "partitioning", or the order of math ops and collectives to get to the right answer.
 Here, it does NOT use reduce-scatter, but instead uses all-reduce and slice, likely because
 this is run on a mocked CPU mesh.
 
@@ -100,7 +100,7 @@ lowered.as_text()= module @jit_f attributes {mhlo.num_partitions = 8 : i32, mhlo
 computation.as_text()= HloModule jit_f, is_scheduled=true, entry_computation_layout={(s32[2,256]{1,0}, s32[1024,1024]{1,0}, s32[1024,1024]{1,0})->s32[2,256]{1,0}}, allow_spmd_sharding_propagation_to_parameters={false,false,false}, num_partitions=8
 
 FileNames
-1 "/home/yho_google_com/Documents/GitHub/sandbox/scripts/jax_shardy_propagation_placement.py"
+1 "/home/yho_google_com/Documents/GitHub/sandbox/scripts/jax_shardy_propagation_partitioning.py"
 
 FunctionNames
 1 "<module>"
@@ -176,14 +176,13 @@ import numpy as np
 def main() -> int:
     jax.config.update("jax_num_cpu_devices", 8)
 
-    # Ensure that this JAX runtime only sees one CPU.
     print(f"{jax.devices()=}")
     assert (
         str(jax.devices()) == "[CpuDevice(id=0), CpuDevice(id=1), "
         "CpuDevice(id=2), CpuDevice(id=3), CpuDevice(id=4), CpuDevice(id=5), CpuDevice(id=6), CpuDevice(id=7)]"
     )
 
-    # Create a mesh of shape 8.
+    # Create a mesh of shape 2,4.
     mesh = Mesh(np.array(jax.devices()).reshape(2, 4), ("dp", "tp"))
     print(f"{mesh=}")
 
