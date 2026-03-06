@@ -5,13 +5,23 @@ The first algorithm is the "eager" mode with proper downcasts to f16.
 The second algorithm compiles. Run with different flags to see different results.
 
 ```
-XLA_FLAGS="--xla_allow_excess_precision=true" python scripts/jax_excess_precision.py
+$ XLA_FLAGS="--xla_allow_excess_precision=true" python scripts/jax_excess_precision.py
+
+[[1.015625 0.      ]
+ [0.       1.015625]] float32
+[[1.015686 0.      ]
+ [0.       1.015686]] float32
 ```
 
 and
 
 ```
-XLA_FLAGS="--xla_allow_excess_precision=false" python scripts/jax_excess_precision.py
+$ XLA_FLAGS="--xla_allow_excess_precision=false" python scripts/jax_excess_precision.py
+
+[[1.015625 0.      ]
+ [0.       1.015625]] float32
+[[1.015625 0.      ]
+ [0.       1.015625]] float32
 ```
 """
 
