@@ -6,12 +6,6 @@ JAX has a fascinating approach to performing what PyTorch / MPI would call a sen
 1. All ranks see all code that runs on all ranks, even if that code does not actually run on the local rank
 1. jax.device_put on a jax.Array living on one mesh and assigned to a second mesh will be treated as if it were a send/recv (or even more powerfully, equivalent to a pathways.utils.reshard). 
 
-## History
-
-Skye Wanderman-Milne is a former Googler and contributor to JAX. She proposed a cross-host device put to enable simpler pipeline parallelism (PP) and MPMD schedules. 
-
-The result of her work is doucmented in the JAX Documentation at 
-
 ## Problem and Solution
 
 Directionally, JAX focuses users towards sharded arrays which enforce SPMD behavior. Even “raw” collectives inside a shard_map have input and output spmd typing. JAX doesn’t have send and recv. How might an MPMD pipeline parallel solution be implemented?
@@ -38,9 +32,11 @@ Both ranks participate in the jax.device_put call. For device_0 it is basically 
 
 Similarly, after the jax.device_put call, device_0 will be aware that device_1 owns and accesses the data, but it does not have actual access to the data or perform the second computation.
 
+An example of this is in the [JAX Documentation](https://docs.jax.dev/en/latest/201/placement.html#data-placement). 
+
 ## This repo
 
-The rest of this repo demonstrate a real example of the above psuedo-code. It does not require GKE or slurm or manually ssh'ing into multiple hosts. 
+The rest of this repo demonstrate a real example of the above psuedo-code and documentation. It does not require GKE or slurm or manually ssh'ing into multiple hosts. 
 
 This example creates a 16 TPU cluster of v5e TPUs (viperlite), spanning four hosts. It uses the `worker=all` flag to the `gcloud ssh` command to enable a single command from your local machine to issue commands to the entire cluster. 
 
