@@ -32,7 +32,7 @@ Both ranks participate in the jax.device_put call. For device_0 it is basically 
 
 Similarly, after the jax.device_put call, device_0 will be aware that device_1 owns and accesses the data, but it does not have actual access to the data or perform the second computation.
 
-An example of this is in the [JAX Documentation](https://docs.jax.dev/en/latest/201/placement.html#data-placement). 
+An example of this is in the [JAX Documentation](https://docs.jax.dev/en/latest/501/multiprocess.html#jax-501-multiprocess). 
 
 ## This repo
 
