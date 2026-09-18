@@ -36,7 +36,7 @@ An example of this is in the [JAX Documentation](https://docs.jax.dev/en/latest/
 
 ## This repo
 
-The rest of this repo demonstrate a real example of the above psuedo-code and documentation. It does not require GKE or slurm or manually ssh'ing into multiple hosts. 
+The rest of this repo demonstrate a real example of the above pseudo-code and documentation. It does not require GKE or slurm or manually ssh'ing into multiple hosts.
 
 This example creates a 16 TPU cluster of v5e TPUs (viperlite), spanning four hosts. It uses the `worker=all` flag to the `gcloud ssh` command to enable a single command from your local machine to issue commands to the entire cluster. 
 
