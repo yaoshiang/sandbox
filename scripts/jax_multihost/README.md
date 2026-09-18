@@ -62,7 +62,7 @@ gcloud compute tpus tpu-vm ssh yho-v5e-16 \
 Run 
 
 ```sh
-./kill_all
+./kill_all.sh
 ```
 
 to cleanse any dangling processes.
