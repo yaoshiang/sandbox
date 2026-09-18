@@ -6,8 +6,8 @@ Pipeline stage 1 runs on the second half of the slice (hosts 2 & 3, 8 TPUs).
 Every process runs this EXACT same script, making it SPMD-ish.
 
 But notice the crucial MPMD behavior: 
-- Pipeline Stage 2 hosts run the same program as Pipeline Stage 1...
-- but Pipeline Stage 2 hosts/tpus does not run ops mapped to Pipeline Stage 1's mesh.
+- Pipeline stage 1 hosts run the same program as pipeline stage 0 hosts...
+- but stage 1 hosts/TPUs do not run ops mapped to pipeline stage 0's mesh.
 - Device transfer is through a jax.device_put. This is an incredibly powerful, 
   single-controller-ish paradigm. While it is not true single-controller, 
   it does allow each host to address non-local TPUs directly. 
