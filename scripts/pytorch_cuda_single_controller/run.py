@@ -174,19 +174,23 @@ def main():
             # DP backwards: AR the gradients across the data parallel axis.
             # Transpose grad_rs to shape [fsdp, dp] so each slice is across DP replicas.
             if mesh_size_dp > 1:
-                grad_ar_out = [[None for _ in range(mesh_size_dp)] for _ in range(mesh_size_fsdp)]
+                grad_rs_t = [[grad_rs[dp][fsdp] for dp in range(mesh_size_dp)] for fsdp in range(mesh_size_fsdp)]
+                grad_ar = [[None for _ in range(mesh_size_dp)] for _ in range(mesh_size_fsdp)]
                 for fsdp in range(mesh_size_fsdp):
                     for dp in range(mesh_size_dp):
-                        grad_ar_out[fsdp][dp] = torch.empty_like(grad_rs[dp][fsdp])
+                        grad_ar[fsdp][dp] = torch.empty_like(grad_rs_t[fsdp][dp])
 
                 for fsdp in range(mesh_size_fsdp):
-                    dp_shards = [grad_rs[dp][fsdp] for dp in range(mesh_size_dp)]
-                    torch.cuda.nccl.all_reduce(dp_shards, grad_ar_out[fsdp], op=4) # ncclAvg
+                    torch.cuda.nccl.all_reduce(grad_rs_t[fsdp], grad_ar[fsdp], op=4) # ncclAvg
 
-            # Assign the synchronized gradients to local parameters
-            for dp in range(mesh_size_dp):
-                for fsdp in range(mesh_size_fsdp):
-                    W_hsdp[dp][fsdp].grad = grad_rs[dp][fsdp]
+                # Assign the synchronized gradients from grad_ar [fsdp][dp] to parameters [dp][fsdp]
+                for dp in range(mesh_size_dp):
+                    for fsdp in range(mesh_size_fsdp):
+                        W_hsdp[dp][fsdp].grad = grad_ar[fsdp][dp]
+            else:
+                for dp in range(mesh_size_dp):
+                    for fsdp in range(mesh_size_fsdp):
+                        W_hsdp[dp][fsdp].grad = grad_rs[dp][fsdp]
 
             # Step the optimizer (SGD) for each local weight.
             for dp in range(mesh_size_dp):
