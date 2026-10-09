@@ -67,6 +67,7 @@ def main():
     # Create a logical weight W of size 2048, 8192. This projects 2048 features into 8192,
     # like a FFN1 in a transformer FFN. 
     # Shard the weight per hsdp: replicated on dp, sharded on fsdp. 
+    W_true = torch.randn(2048, 8192) / (2048 ** 0.5)
     W_local = torch.randn(2048, 8192) / (2048 ** 0.5)
     # Create pytree of shape dp, fsdp
     W_hsdp = [[None for _ in range(mesh_size_fsdp)] for _ in range(mesh_size_dp)]
@@ -78,18 +79,22 @@ def main():
             W_hsdp[dp][fsdp] = W_local[slice_start:slice_end, :].to(mesh[dp][fsdp])
 
     # Create a dataset and dataloaders returning (x, ytrue) tuples. 
-    raw_dataset = [(torch.randn(2048), torch.randn(8192)) for _ in range(2048)]
+    raw_dataset = []
+    for _ in range(2048):
+        x = torch.randn(2048)
+        ytrue = x @ W_true
+        raw_dataset.append((x, ytrue))
     dataloader_2048 = itertools.cycle(torch.utils.data.DataLoader(raw_dataset, batch_size=2048))
     dataloader_1024 = itertools.cycle(torch.utils.data.DataLoader(raw_dataset, batch_size=1024))
 
     # Set a learning rate.
-    lr = 2.0
+    lr = 0.3
 
     print(f"{W_hsdp=}")
 
-    # Train this model for 20 steps. A failure will occur on step 11 out of 20. 
+    # Train this model for 100 steps. A failure will occur on step 35.
     step = 1
-    while step <= 20:
+    while step <= 100:
         try:
             print(f"Starting new step... {step}")
             
@@ -144,11 +149,12 @@ def main():
                         losses.append(nn.functional.mse_loss(z_hsdp[dp][fsdp], ytrue_hsdp[dp][fsdp]))
 
             # Backprop the losses locally. 
-            for dp in range(mesh_size_dp):
-                for fsdp in range(mesh_size_fsdp):
-                    dev = mesh[dp][fsdp]
-                    with torch.cuda.stream(torch.cuda.current_stream(device=dev)):
-                        losses[dp * mesh_size_fsdp + fsdp].backward()
+            torch.autograd.backward(losses)
+            # for dp in range(mesh_size_dp):
+            #     for fsdp in range(mesh_size_fsdp):
+            #         dev = mesh[dp][fsdp]
+            #         with torch.cuda.stream(torch.cuda.current_stream(device=dev)):
+            #             losses[dp * mesh_size_fsdp + fsdp].backward()
 
             # Put the grads in their own container.
             grad_gathered = [[None for _ in range(mesh_size_fsdp)] for _ in range(mesh_size_dp)]
@@ -163,7 +169,7 @@ def main():
                     grad_rs[dp][fsdp] = torch.empty_like(W_hsdp[dp][fsdp])
 
             for dp in range(mesh_size_dp):
-                torch.cuda.nccl.reduce_scatter(grad_gathered[dp], grad_rs[dp])
+                torch.cuda.nccl.reduce_scatter(grad_gathered[dp], grad_rs[dp], op=4) # ncclAvg
 
             # DP backwards: AR the gradients across the data parallel axis.
             # Transpose grad_rs to shape [fsdp, dp] so each slice is across DP replicas.
@@ -175,11 +181,7 @@ def main():
 
                 for fsdp in range(mesh_size_fsdp):
                     dp_shards = [grad_rs[dp][fsdp] for dp in range(mesh_size_dp)]
-                    torch.cuda.nccl.all_reduce(dp_shards, grad_ar_out[fsdp])
-
-                for dp in range(mesh_size_dp):
-                    for fsdp in range(mesh_size_fsdp):
-                        grad_rs[dp][fsdp] = grad_ar_out[fsdp][dp] / mesh_size_dp
+                    torch.cuda.nccl.all_reduce(dp_shards, grad_ar_out[fsdp], op=4) # ncclAvg
 
             # Assign the synchronized gradients to local parameters
             for dp in range(mesh_size_dp):
@@ -199,11 +201,12 @@ def main():
                 for fsdp in range(mesh_size_fsdp):
                     with torch.no_grad():
                         loss_val = losses[dp * mesh_size_fsdp + fsdp].item()
-                        eval_losses.append(f"{loss_val:.2f}")
-            print(f"Step {step} losses: {eval_losses}")
+                        eval_losses.append(f"{loss_val:.4f}")
+            if step % 10 == 0:
+                print(f"Step {step} losses: {eval_losses}")
 
             # Simulate a failure on device 3 by using up all its remaining memory.
-            if step == 11:
+            if step == 35:
                 with torch.cuda.device(3):
                     # Empty PyTorch caching allocator cache first so we know exact driver free bytes
                     torch.cuda.empty_cache()
@@ -245,7 +248,7 @@ def main():
                 W_hsdp = W_hsdp[0:flakey_mesh_dim] + W_hsdp[flakey_mesh_dim+1:]
                 mesh_size_dp = len(mesh)
                 mesh_size_total = mesh_size_dp * mesh_size_fsdp
-                lr = lr * (0.5 ** 2) # sqrt lr rate suggests we use a lower lr.
+                lr = lr * (0.5 ** 0.5) # sqrt lr rate suggests we use a lower lr.
                 # Note: for simplicity, we don't worry about deterministic dataloading on re-running the failed step.
                 print(f"Updated mesh after removing flaky slice: {mesh}")
 
