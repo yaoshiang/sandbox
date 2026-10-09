@@ -42,19 +42,20 @@ def main():
 
     print(f"{torch.cuda.is_available()=}")
     print(f"{torch.cuda.device_count()=}")
-    # Print a bunch of cuda diagnostics
     print(f"{torch.cuda.get_device_name(torch.cuda.current_device())=}")
 
     assert torch.cuda.device_count() > 1
     num_devices = torch.cuda.device_count()
 
     # We arrange the devices in a rank 2 mesh. dim=0 is dp, dim=1 is fsdp. 
-    # We treat each dp slices as thje blast radius for elastic training. 
+    # We treat each dp slices as the blast radius for elastic training. 
     mesh_size_dp = 2
     mesh_size_fsdp = num_devices // mesh_size_dp
     mesh_size_total = mesh_size_dp * mesh_size_fsdp
     
-    # Create a logical mesh of devices
+    # Create a logical mesh of devices. This style of creating an
+    # empty pytree of Nones with list comprehension, then 
+    # a nested loop to fill out the data, will be repeated throughout this example. 
     mesh = [[None for _ in range(mesh_size_fsdp)] for _ in range(mesh_size_dp)]
     for dp in range(mesh_size_dp):
         for fsdp in range(mesh_size_fsdp):
@@ -65,7 +66,7 @@ def main():
 
     # Create a logical weight W of size 2048, 8192. This projects 2048 features into 8192,
     # like a FFN1 in a transformer FFN. 
-    # Shard the weight per hsdp: replicated on dp, shardded on fsdp. 
+    # Shard the weight per hsdp: replicated on dp, sharded on fsdp. 
     W_local = torch.randn(2048, 8192) / (2048 ** 0.5)
     # Create pytree of shape dp, fsdp
     W_hsdp = [[None for _ in range(mesh_size_fsdp)] for _ in range(mesh_size_dp)]
@@ -76,7 +77,7 @@ def main():
             slice_end = slice_start + slice_size
             W_hsdp[dp][fsdp] = W_local[slice_start:slice_end, :].to(mesh[dp][fsdp])
 
-    # Create a dataset and dataloaders returning (x, y) tuples. 
+    # Create a dataset and dataloaders returning (x, ytrue) tuples. 
     raw_dataset = [(torch.randn(2048), torch.randn(8192)) for _ in range(2048)]
     dataloader_2048 = itertools.cycle(torch.utils.data.DataLoader(raw_dataset, batch_size=2048))
     dataloader_1024 = itertools.cycle(torch.utils.data.DataLoader(raw_dataset, batch_size=1024))
