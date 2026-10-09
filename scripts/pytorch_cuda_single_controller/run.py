@@ -96,9 +96,9 @@ def main():
             # Get the next batch of data, distribute to devices. 
             match mesh_size_dp:
                 case 1:
-                    batch_x, batch_y = next(dataloader_2048)
-                case 2:
                     batch_x, batch_y = next(dataloader_1024)
+                case 2:
+                    batch_x, batch_y = next(dataloader_2048)
                 case _:
                     raise ValueError(f"Unsupported mesh size: {mesh_size_dp}")
 
