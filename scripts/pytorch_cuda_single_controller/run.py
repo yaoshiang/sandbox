@@ -216,7 +216,7 @@ def main():
                     torch.cuda.empty_cache()
                     free_bytes, _ = torch.cuda.mem_get_info(3)
                     # Leave 20 MB for driver/runtime overhead so this allocation succeeds,
-                    # but leaves cuda:3 with almost 0 bytes free for step 12.
+                    # but leaves cuda:3 with almost 0 bytes free for next step.
                     KEEPALIVE.append(torch.empty(free_bytes - 20 * 1024**2, dtype=torch.uint8, device="cuda:3"))
             # for dev_id in range(torch.cuda.device_count()):
             #     print(f"Device cuda:{dev_id}: {torch.cuda.mem_get_info(dev_id)=}")
