@@ -23,6 +23,177 @@ Execution instructions:
 ```
 uv run python run.py
 ```
+
+Logs from a run.
+
+```
+yho_google_com@aaskhat-l4-8:~/sandbox/scripts/pytorch_cuda_single_controller$ uv run python run.py
+/home/yho_google_com/sandbox/scripts/pytorch_cuda_single_controller/.venv/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+torch.cuda.is_available()=True
+torch.cuda.device_count()=8
+torch.cuda.get_device_name(torch.cuda.current_device())='NVIDIA L4'
+W_hsdp=[[tensor([[-0.003, -0.005,  ...,  0.011,  0.023],
+        [ 0.016,  0.007,  ...,  0.008,  0.003],
+        ...,
+        [ 0.025,  0.006,  ...,  0.028,  0.028],
+        [ 0.019, -0.005,  ...,  0.022,  0.027]], device='cuda:0'), tensor([[ 0.028, -0.004,  ...,  0.009,  0.017],
+        [ 0.025,  0.033,  ...,  0.006, -0.010],
+        ...,
+        [-0.002,  0.003,  ..., -0.001,  0.047],
+        [-0.014,  0.005,  ..., -0.009,  0.004]], device='cuda:1'), tensor([[-0.010,  0.010,  ..., -0.022,  0.017],
+        [-0.002, -0.006,  ...,  0.008,  0.008],
+        ...,
+        [-0.031,  0.005,  ...,  0.007,  0.030],
+        [ 0.006, -0.003,  ..., -0.020,  0.065]], device='cuda:2'), tensor([[ 0.016, -0.046,  ..., -0.002,  0.019],
+        [ 0.021, -0.032,  ...,  0.014,  0.071],
+        ...,
+        [ 0.001,  0.000,  ..., -0.012, -0.027],
+        [-0.014,  0.008,  ...,  0.009,  0.007]], device='cuda:3')], [tensor([[-0.003, -0.005,  ...,  0.011,  0.023],
+        [ 0.016,  0.007,  ...,  0.008,  0.003],
+        ...,
+        [ 0.025,  0.006,  ...,  0.028,  0.028],
+        [ 0.019, -0.005,  ...,  0.022,  0.027]], device='cuda:4'), tensor([[ 0.028, -0.004,  ...,  0.009,  0.017],
+        [ 0.025,  0.033,  ...,  0.006, -0.010],
+        ...,
+        [-0.002,  0.003,  ..., -0.001,  0.047],
+        [-0.014,  0.005,  ..., -0.009,  0.004]], device='cuda:5'), tensor([[-0.010,  0.010,  ..., -0.022,  0.017],
+        [-0.002, -0.006,  ...,  0.008,  0.008],
+        ...,
+        [-0.031,  0.005,  ...,  0.007,  0.030],
+        [ 0.006, -0.003,  ..., -0.020,  0.065]], device='cuda:6'), tensor([[ 0.016, -0.046,  ..., -0.002,  0.019],
+        [ 0.021, -0.032,  ...,  0.014,  0.071],
+        ...,
+        [ 0.001,  0.000,  ..., -0.012, -0.027],
+        [-0.014,  0.008,  ...,  0.009,  0.007]], device='cuda:7')]]
+Starting new step... 1
+Starting new step... 2
+Starting new step... 3
+Starting new step... 4
+Starting new step... 5
+Starting new step... 6
+Starting new step... 7
+Starting new step... 8
+Starting new step... 9
+Starting new step... 10
+Step 10 losses: ['1.9924', '2.0003', '1.9936', '1.9818', '1.9977', '1.9919', '1.9906', '1.9851']
+Starting new step... 11
+Starting new step... 12
+Starting new step... 13
+Starting new step... 14
+Starting new step... 15
+Starting new step... 16
+Starting new step... 17
+Starting new step... 18
+Starting new step... 19
+Starting new step... 20
+Step 20 losses: ['1.9866', '1.9944', '1.9878', '1.9760', '1.9919', '1.9861', '1.9848', '1.9793']
+Starting new step... 21
+Starting new step... 22
+Starting new step... 23
+Starting new step... 24
+Starting new step... 25
+Starting new step... 26
+Starting new step... 27
+Starting new step... 28
+Starting new step... 29
+Starting new step... 30
+Step 30 losses: ['1.9808', '1.9886', '1.9820', '1.9702', '1.9860', '1.9803', '1.9790', '1.9736']
+Starting new step... 31
+Starting new step... 32
+Starting new step... 33
+Starting new step... 34
+Starting new step... 35
+Starting new step... 36
+[W1009 21:05:01.314380562 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 3 while trying to allocate 67108864 bytes (free: 20316160, total: 23745396736).
+[W1009 21:05:01.314535354 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 3 while trying to allocate 67108864 bytes (free: 20316160, total: 23745396736).
+step=36: Caught failure: CUDA out of memory. Tried to allocate 64.00 MiB. GPU 3 has a total capacity of 22.11 GiB of which19.38 MiB is free. Including non-PyTorch memory, this process has 22.09 GiB memory in use. Of the allocated memory 21.74 GiB is allocated by PyTorch, and 13.75 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+Device cuda:0: HEALTHY
+Device cuda:1: HEALTHY
+Device cuda:2: HEALTHY
+[W1009 21:05:01.317321647 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 3 while trying to allocate 67108864 bytes (free: 20316160, total: 23745396736).
+[W1009 21:05:01.317458358 CUDACachingAllocator.cpp:3934] memory allocation failed with OOM on device 3 while trying to allocate 67108864 bytes (free: 20316160, total: 23745396736).
+Device cuda:3: FLAKY
+Device cuda:4: HEALTHY
+Device cuda:5: HEALTHY
+Device cuda:6: HEALTHY
+Device cuda:7: HEALTHY
+Flaky device detected: cuda:3
+Flaky device cuda:3 is part of mesh dim 0
+Updated mesh after removing flaky slice: [['cuda:4', 'cuda:5', 'cuda:6', 'cuda:7']]
+Starting new step... 36
+Starting new step... 37
+Starting new step... 38
+Starting new step... 39
+Starting new step... 40
+Step 40 losses: ['1.9757', '1.9834', '1.9769', '1.9652']
+Starting new step... 41
+Starting new step... 42
+Starting new step... 43
+Starting new step... 44
+Starting new step... 45
+Starting new step... 46
+Starting new step... 47
+Starting new step... 48
+Starting new step... 49
+Starting new step... 50
+Step 50 losses: ['1.9716', '1.9793', '1.9728', '1.9611']
+Starting new step... 51
+Starting new step... 52
+Starting new step... 53
+Starting new step... 54
+Starting new step... 55
+Starting new step... 56
+Starting new step... 57
+Starting new step... 58
+Starting new step... 59
+Starting new step... 60
+Step 60 losses: ['1.9676', '1.9753', '1.9688', '1.9571']
+Starting new step... 61
+Starting new step... 62
+Starting new step... 63
+Starting new step... 64
+Starting new step... 65
+Starting new step... 66
+Starting new step... 67
+Starting new step... 68
+Starting new step... 69
+Starting new step... 70
+Step 70 losses: ['1.9635', '1.9712', '1.9647', '1.9531']
+Starting new step... 71
+Starting new step... 72
+Starting new step... 73
+Starting new step... 74
+Starting new step... 75
+Starting new step... 76
+Starting new step... 77
+Starting new step... 78
+Starting new step... 79
+Starting new step... 80
+Step 80 losses: ['1.9595', '1.9671', '1.9607', '1.9490']
+Starting new step... 81
+Starting new step... 82
+Starting new step... 83
+Starting new step... 84
+Starting new step... 85
+Starting new step... 86
+Starting new step... 87
+Starting new step... 88
+Starting new step... 89
+Starting new step... 90
+Step 90 losses: ['1.9554', '1.9631', '1.9566', '1.9450']
+Starting new step... 91
+Starting new step... 92
+Starting new step... 93
+Starting new step... 94
+Starting new step... 95
+Starting new step... 96
+Starting new step... 97
+Starting new step... 98
+Starting new step... 99
+Starting new step... 100
+Step 100 losses: ['1.9514', '1.9590', '1.9526', '1.9410']
+```
 """
 
 
