@@ -432,7 +432,6 @@ def main():
                 raise RuntimeError("Cannot continue with only one slice left in the mesh.")
             
             # We know the flaky device and there's more than 1 dp dim, so reshard down. 
-            flakey_mesh_dim is not None:
             mesh = mesh[0:flakey_mesh_dim] + mesh[flakey_mesh_dim+1:]
             W_hsdp = W_hsdp[0:flakey_mesh_dim] + W_hsdp[flakey_mesh_dim+1:]
             mesh_size_dp = len(mesh)
