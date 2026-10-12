@@ -370,7 +370,12 @@ def main():
                     with torch.no_grad():
                         W_hsdp[dp][fsdp] -= lr * W_hsdp[dp][fsdp].grad
                         W_hsdp[dp][fsdp].grad = None
-            
+
+            # This is where a more serious training loop could checkpoints,
+            # and verify that the parameters are identical across DP 
+            # either via in this program or as an off-line process 
+            # reviewing the materialized checkpoints. 
+
             # Eval the model
             eval_losses = []
             for dp in range(mesh_size_dp):
@@ -414,19 +419,27 @@ def main():
                         flaky_device = dev_id
                         flakey_mesh_dim = dp
 
+            if flaky_device is None:
+                print("Step failed, but no flaky device detected.")
+                raise
+
             # This is basically pathwaysutils.elastic.manager & elastic_handler
             print(f"Flaky device detected: cuda:{flaky_device}")
             print(f"Flaky device cuda:{flaky_device} is part of mesh dim {flakey_mesh_dim}")
 
-            # Create a new mesh and weight pytree without the flaky slice. 
-            if flakey_mesh_dim is not None:
-                mesh = mesh[0:flakey_mesh_dim] + mesh[flakey_mesh_dim+1:]
-                W_hsdp = W_hsdp[0:flakey_mesh_dim] + W_hsdp[flakey_mesh_dim+1:]
-                mesh_size_dp = len(mesh)
-                mesh_size_total = mesh_size_dp * mesh_size_fsdp
-                lr = lr * (0.5 ** 0.5) # sqrt lr rate suggests we use a lower lr.
-                # Note: for simplicity, we don't worry about deterministic dataloading on re-running the failed step.
-                print(f"Updated mesh after removing flaky slice: {mesh}")
+            if len(mesh) == 1:
+                print("Only one slice left in the mesh, cannot remove flaky slice.")
+                raise RuntimeError("Cannot continue with only one slice left in the mesh.")
+            
+            # We know the flaky device and there's more than 1 dp dim, so reshard down. 
+            flakey_mesh_dim is not None:
+            mesh = mesh[0:flakey_mesh_dim] + mesh[flakey_mesh_dim+1:]
+            W_hsdp = W_hsdp[0:flakey_mesh_dim] + W_hsdp[flakey_mesh_dim+1:]
+            mesh_size_dp = len(mesh)
+            mesh_size_total = mesh_size_dp * mesh_size_fsdp
+            lr = lr * (0.5 ** 0.5) # sqrt lr rate suggests we use a lower lr.
+            # Note: for simplicity, we don't worry about deterministic dataloading on re-running the failed step.
+            print(f"Updated mesh after removing flaky slice: {mesh}")
 
 if __name__ == "__main__":
     sys.exit(main())
