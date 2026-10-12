@@ -263,7 +263,8 @@ def main():
 
     print(f"{W_hsdp=}")
 
-    # Train this model for 100 steps. A failure will occur on step 35.
+    # Train this model for 100 steps. Memory pressure is injected after step 35,
+    # causing the simulated failure on step 36.
     step = 1
     while step <= 100:
         try:
