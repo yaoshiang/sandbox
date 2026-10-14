@@ -39,7 +39,7 @@ class _HSDPLinearFunction(torch.autograd.Function):
 
         # Forward AG along FSDP axis
         gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
-        dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh["fsdp"].get_group(rank=rank))
+        dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp", rank))
 
         # Forward GEMM: (B, 2048) @ (2048, 8192) -> (B, 8192)
         y = x @ gathered_weight
@@ -57,7 +57,7 @@ class _HSDPLinearFunction(torch.autograd.Function):
 
             # 1. Collective rematerialization (Re-AG) on backward
             gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
-            dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh["fsdp"].get_group(rank=rank))
+            dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp", rank))
 
             # 2. Compute input gradient: (B, 8192) @ (8192, 2048) -> (B, 2048)
             grad_x = grad_output @ gathered_weight.t()
@@ -74,11 +74,11 @@ class _HSDPLinearFunction(torch.autograd.Function):
             out_features = 8192
 
             grad_weight_shard = torch.empty(shard_in_features, out_features, device=grad_output.device, dtype=grad_output.dtype)
-            dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=mesh["fsdp"].get_group(rank=rank), op=dist.ReduceOp.AVG)
+            dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=mesh.get_group("fsdp", rank), op=dist.ReduceOp.AVG)
 
             # 5. DP Backward: All-Reduce the scattered gradient across DP replicas
             if mesh.size("dp") > 1:
-                dist.all_reduce(grad_weight_shard, group=mesh["dp"].get_group(rank=rank), op=dist.ReduceOp.AVG)
+                dist.all_reduce(grad_weight_shard, group=mesh.get_group("dp", rank), op=dist.ReduceOp.AVG)
 
             # These map to the arguments to forward (x, weight_shard, mesh, rank).
             return grad_x, grad_weight_shard, None, None
