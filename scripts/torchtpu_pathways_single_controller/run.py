@@ -14,42 +14,6 @@ from torch import nn
 from torch.utils._pytree import tree_flatten, tree_map, tree_unflatten
 from torch.utils.data import DataLoader, TensorDataset
 
-def create_fake_data_and_checkpoint(tempdir, dp:int, fsdp:int) -> None:
-    """Create a fake checkpoint (sharded as dp=2, fsdp=4) and data.
-    
-    Stores the model shards as `model_{dp}_{fsdp}.pt` in the temporary directory.
-    Stores the data as `data.pt` in the temporary directory.
-
-    Args:
-        tempdir: Temporary directory to store the checkpoint and data.
-        dp: Number of data parallel shards.
-        fsdp: Number of FSDP shards.
-    """
-    assert torch.cuda.current_device() == "cpu"
-
-    # Create fake model weights
-    torch.manual_seed(0)
-    model_cpu = nn.Linear(2048, 8192, bias=False)
-
-    for dp_ in range(dp):
-        for fsdp_ in range(fsdp):
-            assert 2048 % fsdp == 0
-            model_shard_cpu = nn.Linear(2048 // fsdp, 8192, bias=False)
-            slice_size = 2048 // fsdp
-            slice_start = fsdp_ * slice_size
-            slice_end = slice_start + slice_size
-            model_shard_cpu.state_dict()["weight"][:] = model_cpu.state_dict()["weight"][slice_start:slice_end, ...]
-            
-            name = f"{tempdir.name}/model_dp{dp_}_fsdp{fsdp_}"
-            torch.save(model_shard_cpu.state_dict(), f"{name}.pt")
-
-    model_true = nn.Linear(2048, 8192, bias=False)
-    x = torch.randn(32, 2048)
-    y = model_true(x)
-    torch.save((x, y), f"{tempdir.name}/data.pt")
-
-    return
-
 class _HSDPLinearFunction(torch.autograd.Function):
     """A custom autograd function for HSDP with collective activation checkpointing.
 
@@ -86,37 +50,38 @@ class _HSDPLinearFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        x, weight_shard = ctx.saved_tensors
-        mesh = ctx.mesh
-        rank = ctx.rank
+        with torch.no_grad():
+            x, weight_shard = ctx.saved_tensors
+            mesh = ctx.mesh
+            rank = ctx.rank
 
-        # 1. Collective rematerialization (Re-AG) on backward
-        gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
-        dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh["fsdp"].get_group(rank=rank))
+            # 1. Collective rematerialization (Re-AG) on backward
+            gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
+            dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh["fsdp"].get_group(rank=rank))
 
-        # 2. Compute input gradient: (B, 8192) @ (8192, 2048) -> (B, 2048)
-        grad_x = grad_output @ gathered_weight.t()
-        # Discard gathered_weight again
-        del gathered_weight
+            # 2. Compute input gradient: (B, 8192) @ (8192, 2048) -> (B, 2048)
+            grad_x = grad_output @ gathered_weight.t()
+            # Discard gathered_weight again
+            del gathered_weight
 
-        # 3. Compute full weight gradient: (2048, B) @ (B, 8192) -> (2048, 8192)
-        grad_gathered_weight = x.t() @ grad_output
+            # 3. Compute full weight gradient: (2048, B) @ (B, 8192) -> (2048, 8192)
+            grad_gathered_weight = x.t() @ grad_output
 
-        # 4. FSDP Backward: Reduce-Scatter full gradient along FSDP axis
-        fsdp_size = mesh.size("fsdp")
-        assert 2048 % fsdp_size == 0
-        shard_in_features = 2048 // fsdp_size
-        out_features = 8192
+            # 4. FSDP Backward: Reduce-Scatter full gradient along FSDP axis
+            fsdp_size = mesh.size("fsdp")
+            assert 2048 % fsdp_size == 0
+            shard_in_features = 2048 // fsdp_size
+            out_features = 8192
 
-        grad_weight_shard = torch.empty(shard_in_features, out_features, device=grad_output.device, dtype=grad_output.dtype)
-        dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=mesh["fsdp"].get_group(rank=rank))
+            grad_weight_shard = torch.empty(shard_in_features, out_features, device=grad_output.device, dtype=grad_output.dtype)
+            dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=mesh["fsdp"].get_group(rank=rank), op=dist.ReduceOp.AVG)
 
-        # 5. DP Backward: All-Reduce the scattered gradient across DP replicas
-        if mesh.size("dp") > 1:
-            dist.all_reduce(grad_weight_shard, group=mesh["dp"].get_group(rank=rank), op=dist.ReduceOp.AVG)
+            # 5. DP Backward: All-Reduce the scattered gradient across DP replicas
+            if mesh.size("dp") > 1:
+                dist.all_reduce(grad_weight_shard, group=mesh["dp"].get_group(rank=rank), op=dist.ReduceOp.AVG)
 
-        # These map to the arguments to forward. 
-        return grad_x, grad_weight_shard, None
+            # These map to the arguments to forward (x, weight_shard, mesh, rank).
+            return grad_x, grad_weight_shard, None, None
 
 
 class HSDPLinear(nn.Module):
@@ -139,7 +104,7 @@ class HSDPLinear(nn.Module):
         On forward, AG on the FSDP axis to compute y, then frees the gathered weight.
         On backward, Re-AGs the weight to compute dL/dx, RS on FSDP for dL/dW, and AR on DP.
         """
-        return _HSDPLinearFunction.apply(x, self.weight, self.mesh)
+        return _HSDPLinearFunction.apply(x, self.weight, self.mesh, self.rank)
 
 def train_step(model: HSDPLinear, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # Forward pass
@@ -156,16 +121,57 @@ def train_step(model: HSDPLinear, x: torch.Tensor, y: torch.Tensor) -> torch.Ten
                 param.grad.zero_()
     return loss
 
-def tree_zip(tree):
-    """Zips a pytree of iterables, yielding a matching pytree of elements at each step.
+def create_fake_data_and_checkpoint(tempdir, dp: int, fsdp: int) -> None:
+    """Create a fake checkpoint (sharded as dp=2, fsdp=4) and data.
+    
+    Stores the model shards as `model_{dp}_{fsdp}.pt` in the temporary directory.
+    Stores the data as `data.pt` in the temporary directory.
 
-    Flattens the pytree of DataLoaders into leaf iterators, uses `zip(*leaves)` to step
-    through all shards in lockstep until the dataloaders run out, and unflattens the items
-    back into the original nested mesh structure.
+    Args:
+        tempdir: Temporary directory to store the checkpoint and data.
+        dp: Number of data parallel shards.
+        fsdp: Number of FSDP shards.
     """
-    leaves, spec = tree_flatten(tree)
-    for items in zip(*leaves):
-        yield tree_unflatten(items, spec)
+    assert torch.cuda.current_device() == "cpu"
+
+    # Create fake full model weights
+    torch.manual_seed(0)
+    full_weight = torch.randn(2048, 8192)
+
+    rank_mesh = torch.arange(dp * fsdp).reshape(dp, fsdp)
+    cpu_mesh = dist.DeviceMesh("cpu", rank_mesh, ["dp", "fsdp"])
+
+    for dp_ in range(dp):
+        for fsdp_ in range(fsdp):
+            assert 2048 % fsdp == 0
+            rank_id = dp_ * fsdp + fsdp_
+            model_shard = HSDPLinear(cpu_mesh, rank=rank_id)
+            slice_size = 2048 // fsdp
+            slice_start = fsdp_ * slice_size
+            slice_end = slice_start + slice_size
+            model_shard.weight.data.copy_(full_weight[slice_start:slice_end, :])
+            
+            name = f"{tempdir.name}/model_dp{dp_}_fsdp{fsdp_}"
+            torch.save(model_shard.state_dict(), f"{name}.pt")
+
+    x = torch.randn(32, 2048)
+    y = x @ full_weight
+    torch.save((x, y), f"{tempdir.name}/data.pt")
+
+    return
+
+def tree_zip(*trees):
+    """Zips one or more pytrees of iterables, yielding a matching tuple of pytrees at each step.
+
+    Flattens each pytree of DataLoaders into leaf iterators, steps through all shards
+    in lockstep until the dataloaders run out, and unflattens each tree back into its original
+    nested mesh structure.
+    """
+    flat_trees = [tree_flatten(t)[0] for t in trees]
+    specs = [tree_flatten(t)[1] for t in trees]
+    iter_steps = [zip(*ft) for ft in flat_trees]
+    for step_leaves_per_tree in zip(*iter_steps):
+        yield tuple(tree_unflatten(leaves, spec) for leaves, spec in zip(step_leaves_per_tree, specs))
 
 
 def train(tempdir, dp_size: int, fsdp_size: int):
@@ -198,7 +204,7 @@ def train(tempdir, dp_size: int, fsdp_size: int):
     # with the exact same nested (2, 4) topology without requiring manual nested loops.
     def load_model_shard(rank_id: int) -> HSDPLinear:
         # Create the model on cpu.
-        shard = HSDPLinear(mesh)
+        shard = HSDPLinear(mesh, rank=rank_id)
         # Get checkpoint from disk. Lookup correct filename based on mesh coordinates.
         dp_idx, fsdp_idx = mesh.get_coordinate_for_rank(rank_id)
         state_dict = torch.load(f"{tempdir.name}/model_dp{dp_idx}_fsdp{fsdp_idx}.pt")
@@ -227,9 +233,11 @@ def train(tempdir, dp_size: int, fsdp_size: int):
 
     # Determine batch size per device (e.g. 2 samples per step per device)
     step_batch_size = 2
-    # Create nested (2, 4) TensorDatasets and DataLoaders on CPU host using tree_map
-    dataset_shards: list[list[TensorDataset]] = tree_map(lambda xs, ys: TensorDataset(xs, ys), x_shards, y_shards)
-    dataloader_shards: list[list[DataLoader]] = tree_map(lambda ds: DataLoader(ds, batch_size=step_batch_size, shuffle=False), dataset_shards)
+    # Create separate nested (2, 4) DataLoaders for x and y on CPU host using tree_map
+    x_dataloaders: list[list[DataLoader]] = tree_map(lambda xs: DataLoader(TensorDataset(xs), batch_size=step_batch_size, shuffle=False), x_shards)
+    y_dataloaders: list[list[DataLoader]] = tree_map(lambda ys: DataLoader(TensorDataset(ys), batch_size=step_batch_size, shuffle=False), y_shards)
+
+    del x_full, y_full, x_shards, y_shards
 
     # By setting the "tpu_pathways_mesh" options dict key to the mesh, 
     # we ask torch to compile the function for the TPU Pathways backend.
@@ -241,20 +249,18 @@ def train(tempdir, dp_size: int, fsdp_size: int):
     # SingleDeviceSharding will be unified into a xla::ifrt::Array with ConcreteEvenSharding. 
 
     # def torch_compile_patch
-    compiled_train_step = torch.compile(backend="tpu", fn=train_step, options={"tpu_pathways_mesh": mesh})
+    compiled_train_step = torch.compile(train_step, backend="tpu", options={"tpu_pathways_mesh": mesh})
 
     def save_model_shard(rank_id: int, shard: HSDPLinear) -> None:
         dp_idx, fsdp_idx = mesh.get_coordinate_for_rank(rank_id)
         torch.save(shard.to("cpu").state_dict(), f"{tempdir.name}/model_shard_dp{dp_idx}_fsdp{fsdp_idx}.pt")
 
     for epoch in range(1, 101):
-        # Iterate over all mini-batches until the DataLoaders run out using tree_zip
-        for batch_shards in tree_zip(dataloader_shards):
-            # Extract CPU batches, then transfer each shard to its corresponding TPU device (tpu:{rank_id})
-            batch_x_cpu = tree_map(lambda b: b[0], batch_shards)
-            batch_y_cpu = tree_map(lambda b: b[1], batch_shards)
-            batch_x = tree_map(lambda r, bx: bx.to(f"tpu:{r}"), rank_mesh.tolist(), batch_x_cpu)
-            batch_y = tree_map(lambda r, by: by.to(f"tpu:{r}"), rank_mesh.tolist(), batch_y_cpu)
+        # Iterate over all mini-batches until the DataLoaders run out using tree_zip across both trees
+        for batches_x_cpu, batches_y_cpu in tree_zip(x_dataloaders, y_dataloaders):
+            # Transfer each tensor shard from host CPU to its target TPU device directly (batch_x_cpu is a tree of single-element tuples/tensors)
+            batch_x = tree_map(lambda x, rank: x[0].to(f"tpu:{rank}"), batches_x_cpu, rank_mesh.tolist())
+            batch_y = tree_map(lambda y, rank: y[0].to(f"tpu:{rank}"), batches_y_cpu, rank_mesh.tolist())
 
             loss = compiled_train_step(model_shards, batch_x, batch_y)
 
