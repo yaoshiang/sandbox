@@ -39,6 +39,12 @@ class _HSDPLinearFunction(torch.autograd.Function):
 
         # Forward AG along FSDP axis
         gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
+        
+        # There is no API in PyTorch called mesh.get_group(mesh_axis: str, rank:int).
+        # This is probably a new API since DeviceMesh assumes multi-controller and that
+        # the rank is looked up via torch.accelerator.current_device(). 
+        # This inforamtion should be sufficient to lower to shlo::all_gather with 
+        # the replica_groups arg.
         dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp", rank))
 
         # Forward GEMM: (B, 2048) @ (2048, 8192) -> (B, 8192)
@@ -132,7 +138,7 @@ def create_fake_data_and_checkpoint(tempdir, dp: int, fsdp: int) -> None:
         dp: Number of data parallel shards.
         fsdp: Number of FSDP shards.
     """
-    assert torch.cuda.current_device() == "cpu"
+    assert torch.get_default_device().type == "cpu"
 
     # Create fake full model weights
     torch.manual_seed(0)
@@ -253,7 +259,9 @@ def train(tempdir, dp_size: int, fsdp_size: int):
 
     def save_model_shard(rank_id: int, shard: HSDPLinear) -> None:
         dp_idx, fsdp_idx = mesh.get_coordinate_for_rank(rank_id)
-        torch.save(shard.to("cpu").state_dict(), f"{tempdir.name}/model_shard_dp{dp_idx}_fsdp{fsdp_idx}.pt")
+        # Move state dict tensors to CPU without mutating the shard's device placement in-place
+        state_dict_cpu = tree_map(lambda t: t.to("cpu"), shard.state_dict())
+        torch.save(state_dict_cpu, f"{tempdir.name}/model_dp{dp_idx}_fsdp{fsdp_idx}.pt")
 
     for epoch in range(1, 101):
         # Iterate over all mini-batches until the DataLoaders run out using tree_zip across both trees
