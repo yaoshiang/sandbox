@@ -31,21 +31,27 @@ class _HSDPLinearFunction(torch.autograd.Function):
       6. All-Reduce (AR) grad_weight_shard across DP replicas with averaging.
     """
     @staticmethod
-    def forward(ctx, x: torch.Tensor, weight_shard: torch.Tensor, mesh: dist.DeviceMesh, rank:int) -> torch.Tensor:
+    def forward(ctx, x: torch.Tensor, weight_shard: torch.Tensor, mesh: dist.DeviceMesh) -> torch.Tensor:
         ctx.mesh = mesh
-        ctx.rank = rank
+        # Similar to compile_on_one_rank, if this is called inside a torch.tpu.parallel_map, get_rank()
+        # will NOT be called "eagerly" and return a Python integer to be constant-folded into an fx graph.
+        # Instead, it is lowered to a custom op, coor::current_device_index, that returns a symint. 
+        # TorchTPU will lower this to a StableHLO::replica_id or StableHLO::partition_id.
+        rank = torch.distributed.get_rank()
+
+        # Rank specific logic could live here, such as padding the final sample along a mesh axis. 
+        del rank
+
         # Save x and weight_shard; discard gathered_weight so memory is not held during forward activations
         ctx.save_for_backward(x, weight_shard)
 
         # Forward AG along FSDP axis
         gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
         
-        # There is no API in PyTorch called mesh.get_group(mesh_axis: str, rank:int).
-        # This is probably a new API since DeviceMesh assumes multi-controller and that
-        # the rank is looked up via torch.accelerator.current_device(). 
-        # This inforamtion should be sufficient to lower to shlo::all_gather with 
-        # the replica_groups arg.
-        dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp", rank))
+        # Similar to torch.distributed.get_rank(), the mesh.get_group() call below 
+        # should not be executed eagerly in the FX trace.
+        fsdp_group = mesh.get_group("fsdp")
+        dist.all_gather_into_tensor(gathered_weight, weight_shard, group=fsdp_group)
 
         # Forward GEMM: (B, 2048) @ (2048, 8192) -> (B, 8192)
         y = x @ gathered_weight
@@ -59,7 +65,6 @@ class _HSDPLinearFunction(torch.autograd.Function):
         with torch.no_grad():
             x, weight_shard = ctx.saved_tensors
             mesh = ctx.mesh
-            rank = ctx.rank
 
             # 1. Collective rematerialization (Re-AG) on backward
             gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
@@ -80,18 +85,20 @@ class _HSDPLinearFunction(torch.autograd.Function):
             out_features = 8192
 
             grad_weight_shard = torch.empty(shard_in_features, out_features, device=grad_output.device, dtype=grad_output.dtype)
-            dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=mesh.get_group("fsdp", rank), op=dist.ReduceOp.AVG)
+            fsdp_group = mesh.get_group("fsdp")
+            dist.reduce_scatter_tensor(grad_weight_shard, grad_gathered_weight, group=fsdp_group, op=dist.ReduceOp.AVG)
 
             # 5. DP Backward: All-Reduce the scattered gradient across DP replicas
             if mesh.size("dp") > 1:
-                dist.all_reduce(grad_weight_shard, group=mesh.get_group("dp", rank), op=dist.ReduceOp.AVG)
+                dp_group = mesh.get_group("dp")
+                dist.all_reduce(grad_weight_shard, group=dp_group, op=dist.ReduceOp.AVG)
 
-            # These map to the arguments to forward (x, weight_shard, mesh, rank).
-            return grad_x, grad_weight_shard, None, None
+            # These map to the arguments to forward (x, weight_shard, mesh).
+            return grad_x, grad_weight_shard, None
 
 
 class HSDPLinear(nn.Module):
-    def __init__(self, mesh: dist.DeviceMesh, rank:int):
+    def __init__(self, mesh: dist.DeviceMesh):
         """HSDP aware linear layer. 
 
         Assumes global size of 2048, 8192 like a FFN1 layer.
@@ -100,7 +107,6 @@ class HSDPLinear(nn.Module):
         """
         super().__init__()
         self.mesh = mesh
-        self.rank = rank
         assert 2048 % mesh.size("fsdp") == 0
         self.weight = nn.Parameter(torch.randn(2048 // mesh.size("fsdp"), 8192))
 
@@ -110,7 +116,7 @@ class HSDPLinear(nn.Module):
         On forward, AG on the FSDP axis to compute y, then frees the gathered weight.
         On backward, Re-AGs the weight to compute dL/dx, RS on FSDP for dL/dW, and AR on DP.
         """
-        return _HSDPLinearFunction.apply(x, self.weight, self.mesh, self.rank)
+        return _HSDPLinearFunction.apply(x, self.weight, self.mesh)
 
 def train_step(model: HSDPLinear, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     # Forward pass
@@ -151,7 +157,7 @@ def create_fake_data_and_checkpoint(tempdir, dp: int, fsdp: int) -> None:
         for fsdp_ in range(fsdp):
             assert 2048 % fsdp == 0
             rank_id = dp_ * fsdp + fsdp_
-            model_shard = HSDPLinear(cpu_mesh, rank=rank_id)
+            model_shard = HSDPLinear(cpu_mesh)
             slice_size = 2048 // fsdp
             slice_start = fsdp_ * slice_size
             slice_end = slice_start + slice_size
