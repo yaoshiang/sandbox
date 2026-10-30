@@ -33,14 +33,15 @@ class _HSDPLinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x: torch.Tensor, weight_shard: torch.Tensor, mesh: dist.DeviceMesh) -> torch.Tensor:
         ctx.mesh = mesh
-        # Similar to compile_on_one_rank, if this is called inside a torch.tpu.parallel_map, get_rank()
-        # will NOT be called "eagerly" and return a Python integer to be constant-folded into an fx graph.
-        # Instead, it is lowered to a custom op, coor::current_device_index, that returns a symint. 
-        # TorchTPU will lower this to a StableHLO::replica_id or StableHLO::partition_id.
-        rank = torch.distributed.get_rank()
 
-        # Rank specific logic could live here, such as padding the final sample along a mesh axis. 
-        del rank
+        # Users cannot call torch.distributed.get_rank(). Similar to the challanges with coor, we will
+        # have to limit the ability for users to create non-spmd code. 
+        try:  
+            rank = torch.distributed.get_rank()
+            raise Exception("Calling torch.distributed.get_rank() should not have succeeded!")
+        except RuntimeError:
+            # This is expected
+            pass
 
         # Save x and weight_shard; discard gathered_weight so memory is not held during forward activations
         ctx.save_for_backward(x, weight_shard)
@@ -48,8 +49,6 @@ class _HSDPLinearFunction(torch.autograd.Function):
         # Forward AG along FSDP axis
         gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
         
-        # Similar to torch.distributed.get_rank(), the mesh.get_group() call below 
-        # should not be executed eagerly in the FX trace.
         fsdp_group = mesh.get_group("fsdp")
         dist.all_gather_into_tensor(gathered_weight, weight_shard, group=fsdp_group)
 
@@ -68,7 +67,7 @@ class _HSDPLinearFunction(torch.autograd.Function):
 
             # 1. Collective rematerialization (Re-AG) on backward
             gathered_weight = torch.empty(2048, 8192, device=weight_shard.device, dtype=weight_shard.dtype)
-            dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp", rank))
+            dist.all_gather_into_tensor(gathered_weight, weight_shard, group=mesh.get_group("fsdp"))
 
             # 2. Compute input gradient: (B, 8192) @ (8192, 2048) -> (B, 2048)
             grad_x = grad_output @ gathered_weight.t()
@@ -216,7 +215,7 @@ def train(tempdir, dp_size: int, fsdp_size: int):
     # with the exact same nested (2, 4) topology without requiring manual nested loops.
     def load_model_shard(rank_id: int) -> HSDPLinear:
         # Create the model on cpu.
-        shard = HSDPLinear(mesh, rank=rank_id)
+        shard = HSDPLinear(mesh)
         # Get checkpoint from disk. Lookup correct filename based on mesh coordinates.
         dp_idx, fsdp_idx = mesh.get_coordinate_for_rank(rank_id)
         state_dict = torch.load(f"{tempdir.name}/model_dp{dp_idx}_fsdp{fsdp_idx}.pt")
